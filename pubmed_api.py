@@ -175,7 +175,7 @@ class PMCRegexMiner:
     # -----------------------------
     # PIPELINE
     # -----------------------------
-    async def run(self, max_results: int = 100):
+    async def run(self, max_results: int = 5000):
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
 
@@ -268,7 +268,7 @@ async def main():
 
     miner = PMCRegexMiner(KEYWORDS)
 
-    results = await miner.run(max_results=100)
+    results = await miner.run(max_results=5000)
 
     with open("pmc_lcr_full.json", "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
