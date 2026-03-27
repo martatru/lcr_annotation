@@ -1,4 +1,5 @@
-import json
+#26/03/2026
+#this code probably won't work at the first try, bcs i didnt have the inpot to test it yetimport json
 import re
 import os
 import requests
@@ -25,7 +26,7 @@ def extract_uniprot_ids(text):
     return list(set(match[0] for match in matches))
 
 def download_fasta(uniprot_id):
-    """Downloads the FASTA sequence from the UniProt REST API."""
+    """Downloads the FASTA sequence from UniProt API."""
     url = f"https://rest.uniprot.org/uniprotkb/{uniprot_id}.fasta"
     response = requests.get(url)
     if response.status_code == 200:
@@ -35,7 +36,7 @@ def download_fasta(uniprot_id):
 def parse_tool_output(output):
     """
     Universal parser looking for coordinate ranges like '10 - 50' or '10..50' 
-    in the standard output of SEG or CAST.
+    in the standard output.
     NOTE: You might need to adjust the regex depending on how your specific 
     local builds of SEG/CAST format their terminal output.
     """
@@ -60,7 +61,7 @@ def run_local_tool(tool_name, fasta_path):
             text=True, 
             check=False
         )
-        # Combine stdout and stderr (sometimes results are piped to stderr depending on the tool build)
+        # Combine stdout and stderr (sometimes results are piped to stderr)
         full_output = result.stdout + "\n" + result.stderr
         return parse_tool_output(full_output)
     except FileNotFoundError:
@@ -84,7 +85,7 @@ def check_overlap(declared_lcrs, predicted_lcrs):
 
 def main():
     if not os.path.exists(PAPERS_JSON) or not os.path.exists(LCR_JSON):
-        print("Missing input files. Please ensure the JSON extraction scripts ran successfully.")
+        print("Missing input files. Please ensure the previous extraction script ran successfully.")
         return
 
     # Load previously declared LCR ranges
