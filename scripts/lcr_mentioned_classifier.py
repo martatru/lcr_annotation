@@ -1,3 +1,5 @@
+#this code classifies papers using regex, as those which do not mention LCR'S directly, and those who mention it directly
+
 import json
 import re
 
@@ -12,7 +14,7 @@ def classify_lcr_papers(input_filepath, mentioned_filepath, not_mentioned_filepa
         with open(input_filepath, 'r', encoding='utf-8') as f:
             papers = json.load(f)
     except FileNotFoundError:
-        print(f"Błąd: Nie znaleziono pliku {input_filepath}.")
+        print(f"No file was found {input_filepath}.")
         return
 
     for paper in papers:
@@ -35,7 +37,6 @@ def classify_lcr_papers(input_filepath, mentioned_filepath, not_mentioned_filepa
         else:
             lcr_not_mentioned_ids.append(pmc_id)
 
-    # Zapis wyników do plików JSON
     with open(mentioned_filepath, 'w', encoding='utf-8') as f:
         json.dump(lcr_mentioned_ids, f, indent=2)
 

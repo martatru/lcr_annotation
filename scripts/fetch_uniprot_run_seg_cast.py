@@ -1,5 +1,5 @@
-#26/03/2026
-#this code probably won't work at the first try, bcs i didnt have the inpot to test it yetimport json
+#this code is supposed to fetch uniprot id from a paper, take priorly extracted LCR ranges, run SEG and CAST
+#this code probably won't work at the first try, bcs i didnt have the inpot to test it yet
 import re
 import os
 import requests
