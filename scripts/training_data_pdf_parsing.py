@@ -1,162 +1,198 @@
+#this script works poorly, i wanto to try using the "unstructured" python library to read those papers,
+#or maybe try GROBID model
+
+import fitz  # PyMuPDF
 import json
 import re
 import os
 import requests
-import subprocess
-import tempfile
 
 # ==========================================
-# PATH CONFIGURATION
+# CONFIGURATION
 # ==========================================
-PAPERS_JSON = os.path.join("training_data", "extracted_papers_data.json")
-LCR_JSON = os.path.join("training_data", "lcr_locations_found.json")
+PDF_DIRECTORY = "/home/marta/Pulpit/lcr_annotation/training_data/lcr_positive_papers"
+OUTPUT_JSON = "/home/marta/Pulpit/lcr_annotation/training_data/extracted_papers_data_fixed.json"
 
-# Official Regex for UniProt Accession Numbers (e.g., P12345, A0A022Y195)
-UNIPROT_REGEX = re.compile(
-    r"\b([O,P,Q][0-9][A-Z0-9]{3}[0-9]|[A-N,R-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2})\b"
-)
-
-def extract_uniprot_ids(text):
-    """Finds unique UniProt IDs in the provided text."""
-    if not text:
-        return []
-    matches = UNIPROT_REGEX.findall(text)
-    # Extract the first element from the match group and remove duplicates
-    return list(set(match[0] for match in matches))
-
-def download_fasta(uniprot_id):
-    """Downloads the FASTA sequence from the UniProt REST API."""
-    url = f"https://rest.uniprot.org/uniprotkb/{uniprot_id}.fasta"
-    response = requests.get(url)
-    if response.status_code == 200:
-        return response.text
-    return None
-
-def parse_tool_output(output):
-    """
-    Universal parser looking for coordinate ranges like '10 - 50' or '10..50' 
-    in the standard output of SEG or CAST.
-    NOTE: You might need to adjust the regex depending on how your specific 
-    local builds of SEG/CAST format their terminal output.
-    """
-    found_ranges = []
-    # Looks for patterns like: 123-456, 123 - 456, 123..456
-    range_pattern = re.compile(r"\b(\d+)\s*(?:-|\.\.)\s*(\d+)\b")
+def get_pmcid_from_title(title):
+    """Fetches PMC ID from Europe PMC API based on the article title."""
+    if not title or len(title) < 15:
+        return "Unknown"
     
-    for line in output.splitlines():
-        matches = range_pattern.findall(line)
-        for start, end in matches:
-            found_ranges.append({"start": int(start), "end": int(end)})
-            
-    return found_ranges
-
-def run_local_tool(tool_name, fasta_path):
-    """Runs the specified CLI tool and parses its output for LCR ranges."""
+    clean_title = re.sub(r'[^a-zA-Z0-9\s]', '', title[:100])
+    url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+    params = {"query": f'TITLE:"{clean_title}"', "format": "json", "resultType": "lite"}
     try:
-        # Standard execution assumption: `seg file.fasta` or `cast file.fasta`
-        result = subprocess.run(
-            [tool_name, fasta_path], 
-            capture_output=True, 
-            text=True, 
-            check=False
-        )
-        # Combine stdout and stderr (sometimes results are piped to stderr depending on the tool build)
-        full_output = result.stdout + "\n" + result.stderr
-        return parse_tool_output(full_output)
-    except FileNotFoundError:
-        print(f"ERROR: The tool '{tool_name}' was not found in your system's PATH.")
-        return []
+        response = requests.get(url, params=params, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("hitCount", 0) > 0:
+                pmcid = data["resultList"]["result"][0].get("pmcid")
+                if pmcid:
+                    return pmcid
+    except Exception:
+        pass
+    return "Unknown"
 
-def check_overlap(declared_lcrs, predicted_lcrs):
-    """
-    Checks if ANY of the declared LCRs overlap with ANY of the predicted LCRs.
-    Two ranges (A, B) and (C, D) overlap if max(A, C) <= min(B, D).
-    """
-    for decl in declared_lcrs:
-        d_start, d_end = decl["start"], decl["end"]
-        for pred in predicted_lcrs:
-            p_start, p_end = pred["start"], pred["end"]
-            
-            # Condition for range overlap
-            if max(d_start, p_start) <= min(d_end, p_end):
-                return True
-    return False
-
-def main():
-    if not os.path.exists(PAPERS_JSON) or not os.path.exists(LCR_JSON):
-        print("Missing input files. Please ensure the JSON extraction scripts ran successfully.")
-        return
-
-    # Load previously declared LCR ranges
-    with open(LCR_JSON, "r", encoding="utf-8") as f:
-        lcr_data = json.load(f)
+def clean_text(text):
+    """Cleans the text from unnecessary newlines, broken words, and journal artifacts."""
+    if not text:
+        return ""
         
-    # Create a dictionary mapping pmc_id -> declared ranges for quick lookups
-    declared_dict = {item["pmc_id"]: item["lcr_mentions"] for item in lcr_data}
+    artifacts = [
+        r'(?i)\bARTICLE IN PRESS\b',
+        r'(?i)\bNature Communications\b',
+        r'(?i)https?://doi\.org/\S+',
+        r'(?i)rights reserved\.',
+        r'(?i)\bPRESS\b'
+    ]
+    for artifact in artifacts:
+        text = re.sub(artifact, '', text)
 
-    # Load original paper texts
-    with open(PAPERS_JSON, "r", encoding="utf-8") as f:
-        papers = json.load(f)
+    # Fix hyphenated line breaks (e.g. low-\ncomplexity -> low-complexity)
+    text = re.sub(r'([a-z])-[\n\r]+\s*([a-z])', r'\1\2', text, flags=re.IGNORECASE)
+    # Normalize spaces
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
-    for paper in papers:
-        pmc_id = paper.get("pmc_id", "Unknown")
-        
-        # We only care about papers where LCRs were actually found in the previous step
-        if pmc_id not in declared_dict:
-            continue
-            
-        declared_lcrs = declared_dict[pmc_id]
-        
-        # Merge all sections to search for UniProt IDs
-        full_text = " ".join([
-            paper.get("abstract", ""),
-            paper.get("introduction", ""),
-            paper.get("results", ""),
-            paper.get("discussion", ""),
-            paper.get("conclusion", "")
-        ])
+def parse_single_pdf(pdf_path):
+    print(f"Processing: {os.path.basename(pdf_path)} ...")
+    
+    article_data = {
+        "pmc_id": "Unknown",
+        "title": "",
+        "abstract": "",
+        "introduction": "",
+        "results": "",
+        "discussion": "",
+        "conclusion": "",
+        "authors": []
+    }
+    
+    # Try to extract PMC_ID from filename
+    filename_match = re.search(r'(PMC\d+)', os.path.basename(pdf_path), re.IGNORECASE)
+    if filename_match:
+        article_data["pmc_id"] = filename_match.group(1).upper()
 
-        # Extract UniProt IDs
-        uniprot_ids = extract_uniprot_ids(full_text)
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception as e:
+        print(f"  -> Error reading PDF: {e}")
+        return article_data
+
+    # State Machine variables
+    current_section = "title"
+    
+    # Regex to identify headers (handles "1. Introduction", "Results:", "III. Discussion")
+    header_regex = re.compile(
+        r'^(?:\d+\.?\s*|[IVX]+\.?\s*)?(Abstract|Summary|Introduction|Background|Results|Discussion|Conclusions?|Methods|Materials and Methods|Experimental Procedures|References?)(?:\s*:|\.)?\s*(.*)', 
+        re.IGNORECASE | re.DOTALL
+    )
+
+    for page in doc:
+        # Define crop margins (ignore top 7% and bottom 7% for headers/footers/DOIs)
+        rect = page.rect
+        margin_y = rect.height * 0.07  
         
-        if not uniprot_ids:
-            continue
-            
-        print(f"\n[{pmc_id}] Found UniProt IDs: {uniprot_ids}")
+        # Extract blocks of text (preserves logical reading order)
+        blocks = page.get_text("blocks")
         
-        for uid in uniprot_ids:
-            print(f"  Downloading FASTA for {uid}...")
-            fasta_text = download_fasta(uid)
-            
-            if not fasta_text:
-                print(f"  -> Failed to download sequence for {uid}.")
+        for b in blocks:
+            # PyMuPDF block format: (x0, y0, x1, y1, "text", block_no, block_type)
+            if b[6] != 0: # 0 means text block
+                continue
+                
+            # Skip blocks that fall inside our header/footer crop margins
+            if b[1] < rect.y0 + margin_y or b[3] > rect.y1 - margin_y:
                 continue
 
-            # Save the FASTA string to a temporary file to pass to CLI tools
-            with tempfile.NamedTemporaryFile(mode='w', suffix=".fasta", delete=False) as tmp:
-                tmp.write(fasta_text)
-                tmp_path = tmp.name
+            text = b[4].strip()
+            if not text:
+                continue
 
-            # STEP 1: RUN SEG
-            print(f"  -> Running SEG...")
-            seg_lcrs = run_local_tool("seg", tmp_path)
-            
-            if seg_lcrs and check_overlap(declared_lcrs, seg_lcrs):
-                print(f"  [SUCCESS] SEG confirmed overlap with declared LCRs for protein {uid}!")
-                os.remove(tmp_path)
-                continue # Move on to the next protein/paper
-            
-            # STEP 2: RUN CAST (Fallback if SEG found no overlap)
-            print(f"  -> SEG found no overlap. Running CAST...")
-            cast_lcrs = run_local_tool("cast", tmp_path)
-            
-            if cast_lcrs and check_overlap(declared_lcrs, cast_lcrs):
-                print(f"  [SUCCESS] CAST confirmed overlap with declared LCRs for protein {uid}!")
-            else:
-                print(f"  [NO OVERLAP] Neither tool (SEG/CAST) confirmed the declared LCRs for {uid}.")
+            # Try to match PMC ID in text if we still don't have it
+            if article_data["pmc_id"] == "Unknown":
+                pmc_match = re.search(r'\b(PMC\d{6,8})\b', text, re.IGNORECASE)
+                if pmc_match:
+                    article_data["pmc_id"] = pmc_match.group(1).upper()
 
-            # Clean up temporary file
-            os.remove(tmp_path)
+            # Check if block is a section header
+            match = header_regex.match(text)
+            
+            # To prevent false positives (like a sentence starting with "Results of the..."),
+            # we only treat it as a header if the block is short OR it has a distinct separator like "1. Results."
+            is_header = False
+            if match:
+                keyword = match.group(1).lower()
+                remainder = match.group(2)
+                
+                if len(text) < 100: 
+                    is_header = True
+                elif bool(re.match(r'^(?:\d+\.?|[IVX]+\.?|.*:)', text)):
+                    is_header = True
+
+                if is_header:
+                    # Route to the correct bucket
+                    if "abstract" in keyword or "summary" in keyword:
+                        current_section = "abstract"
+                    elif "intro" in keyword or "background" in keyword:
+                        current_section = "introduction"
+                    elif "result" in keyword:
+                        current_section = "results"
+                    elif "discuss" in keyword:
+                        current_section = "discussion"
+                    elif "conclu" in keyword:
+                        current_section = "conclusion"
+                    elif "method" in keyword or "experi" in keyword:
+                        current_section = "methods" # Temporarily routes out of main sections
+                    elif "refer" in keyword or "bibliog" in keyword:
+                        current_section = "references" # Routes out of main sections
+                        
+                    # If it was an inline header (e.g., "1. Results. We found that..."), keep the rest of the text
+                    if remainder.strip():
+                        text = remainder.strip()
+                    else:
+                        continue # Move to the next block
+
+            # Auto-switch title to abstract if title gets too long (missed the abstract header)
+            if current_section == "title" and len(article_data["title"]) > 400:
+                current_section = "abstract"
+
+            # Append text to the active bucket
+            if current_section in article_data:
+                article_data[current_section] += text + "\n"
+
+    # Clean the extracted text
+    for key in article_data.keys():
+        if key not in ["pmc_id", "authors"]:
+            article_data[key] = clean_text(article_data[key])
+
+    # Fallback to Europe PMC API if PMC ID is still missing
+    if article_data["pmc_id"] == "Unknown" and article_data["title"]:
+        article_data["pmc_id"] = get_pmcid_from_title(article_data["title"])
+
+    return article_data
+
+def main():
+    if not os.path.exists(PDF_DIRECTORY):
+        print(f"Directory '{PDF_DIRECTORY}' does not exist. Please check the path.")
+        return
+
+    extracted_data = []
+    
+    for filename in os.listdir(PDF_DIRECTORY):
+        if filename.lower().endswith(".pdf"):
+            pdf_path = os.path.join(PDF_DIRECTORY, filename)
+            article_json = parse_single_pdf(pdf_path)
+            if article_json:
+                # Remove temporary routing keys so output matches your exact format
+                article_json.pop("methods", None)
+                article_json.pop("references", None)
+                extracted_data.append(article_json)
+
+    with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
+        json.dump(extracted_data, f, ensure_ascii=False, indent=2)
+        
+    print(f"\nSuccess! Processed {len(extracted_data)} articles. Saved to {OUTPUT_JSON}.")
 
 if __name__ == "__main__":
     main()
